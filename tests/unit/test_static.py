@@ -20,7 +20,7 @@ def test_errata_contains_independent_validator_reobservation():
 
 def test_material_corrections_have_deterministic_stale_cascade():
     source = ERRATA.read_text()
-    assert "_stale_claim_cascade" in source
+    assert "_claim_is_current_lazy" in source
     assert "REL_CORRECTS" in source
     assert "REL_RETRACTS" in source
     assert "REL_SUPERSEDES" in source

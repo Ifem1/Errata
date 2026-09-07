@@ -30,7 +30,7 @@ check("validator re-fetches later revision", 'inspect_revision_once(url, subject
 check("verbatim evidence grounding present", "grounded(" in source)
 check("sealed authority surface present", "authority_hosts" in source and "outside the sealed evidence surface" in source)
 check("material correction relations present", all(x in source for x in ("REL_CORRECTS", "REL_RETRACTS", "REL_SUPERSEDES", "REL_AMENDS")))
-check("deterministic stale cascade present", "_stale_claim_cascade" in source)
+check("lazy deterministic stale propagation present", "_claim_is_current_lazy" in source)
 check("definition-hash pinning present", "expected_definition_hash" in source)
 check("claim-hash pinning present", "expected_claim_hash" in source)
 check("CanonGate uses typed Errata interface", "IErrata(self.errata_address)" in canon_gate)

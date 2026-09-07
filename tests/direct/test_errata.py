@@ -172,7 +172,7 @@ def test_forged_initial_evidence_not_on_source_is_rejected(direct_vm, direct_dep
 def test_correction_advances_canon_and_stales_pinned_claim(direct_vm, direct_deploy):
     contract, record_id, v1 = create_active_record(direct_vm, direct_deploy)
     claim_id = contract.create_claim("Grant eligibility gate", record_id, v1, [])
-    claim_hash = contract.get_claim(claim_id)["definition_hash"]
+    claim_hash = contract.get_claim(claim_id)["claim_hash"]
     record_hash_before = contract.get_record(record_id)["canon_hash"]
 
     direct_vm.clear_mocks()
@@ -209,7 +209,7 @@ def test_confirmation_does_not_advance_canon_or_stale_current_claim(direct_vm, d
     mock_correction(direct_vm)
     v2 = contract.propose_revision(record_id, V2_URL)
     claim_id = contract.create_claim("Current deadline dependency", record_id, v2, [])
-    claim_hash = contract.get_claim(claim_id)["definition_hash"]
+    claim_hash = contract.get_claim(claim_id)["claim_hash"]
 
     before = contract.get_record(record_id)
     direct_vm.clear_mocks()
@@ -294,7 +294,7 @@ def test_claim_requires_current_revision(direct_vm, direct_deploy):
 def test_claim_hash_pinning_prevents_substitution(direct_vm, direct_deploy):
     contract, record_id, v1 = create_active_record(direct_vm, direct_deploy)
     claim_id = contract.create_claim("Pinned consumer fact", record_id, v1, [])
-    claim_hash = contract.get_claim(claim_id)["definition_hash"]
+    claim_hash = contract.get_claim(claim_id)["claim_hash"]
     assert contract.is_claim_current(claim_id, claim_hash) is True
     assert contract.is_claim_current(claim_id, "00" * 32) is False
 
@@ -366,7 +366,7 @@ def test_lineage_hash_changes_across_material_revisions(direct_vm, direct_deploy
     assert second["prior_revision_id"] == v1
 
 
-def test_subdomain_of_allowed_host_is_accepted(direct_vm, direct_deploy):
+def test_subdomain_of_exact_host_is_rejected(direct_vm, direct_deploy):
     contract = direct_deploy(CONTRACT)
     record_id = contract.create_record(SUBJECT, DEFINITION)
     contract.add_authority_host(record_id, HOST)
@@ -377,5 +377,35 @@ def test_subdomain_of_allowed_host_is_accepted(direct_vm, direct_deploy):
         {"accepted": True, "statement": STATEMENT_V1, "reason": "clear", "evidence": EVIDENCE_V1},
     )
     direct_vm.mock_llm(EQ_PROMPT, "PASS")
-    revision = contract.publish_initial(record_id, "https://status.example.com/notice")
-    assert contract.get_revision(revision)["relation_name"] == "INITIAL"
+    with direct_vm.expect_revert("outside the sealed evidence surface"):
+        contract.publish_initial(record_id, "https://status.example.com/notice")
+
+
+def test_lazy_freshness_supports_long_dependency_chain(direct_vm, direct_deploy):
+    contract, record_id, revision_id = create_active_record(direct_vm, direct_deploy)
+    parent = 0
+    for index in range(129):
+        parent = contract.create_claim(f"Long dependency {index}", record_id, revision_id, [parent] if parent else [])
+    assert contract.get_claim(parent)["status_name"] == "CURRENT"
+    direct_vm.clear_mocks()
+    mock_correction(direct_vm)
+    contract.propose_revision(record_id, V2_URL)
+    assert contract.get_claim(parent)["status_name"] == "STALE"
+
+
+def test_non_material_assessments_do_not_consume_canon_capacity(direct_vm, direct_deploy):
+    contract, record_id, revision_id = create_active_record(direct_vm, direct_deploy)
+    before = contract.get_record(record_id)
+    for index in range(49):
+        url = f"https://example.com/notices/unrelated-{index}"
+        direct_vm.clear_mocks()
+        direct_vm.mock_web(rf".*unrelated-{index}.*", {"status": 200, "body": PAGE_UNRELATED})
+        direct_vm.mock_llm(REVISION_PROMPT, {"relation": "UNRELATED", "statement": "", "reason": "unrelated", "evidence": ""})
+        contract.propose_revision(record_id, url)
+    after = contract.get_record(record_id)
+    assert after["current_revision_id"] == revision_id
+    assert after["canon_version"] == before["canon_version"]
+    direct_vm.clear_mocks()
+    mock_correction(direct_vm)
+    corrected = contract.propose_revision(record_id, V2_URL)
+    assert contract.get_record(record_id)["current_revision_id"] == corrected

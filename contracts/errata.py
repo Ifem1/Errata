@@ -32,10 +32,7 @@ REL_AMBIGUOUS = 8
 CLAIM_CURRENT = 1
 CLAIM_STALE = 2
 
-MAX_RECORDS = 1024
-MAX_REVISIONS_PER_RECORD = 48
 MAX_AUTHORITY_HOSTS = 6
-MAX_CLAIMS = 2048
 MAX_PARENTS = 8
 MAX_CHILDREN = 16
 MAX_SUBJECT_LEN = 180
@@ -47,7 +44,6 @@ MAX_PAGE_CHARS = 18000
 MAX_STATEMENT_LEN = 900
 MAX_REASON_LEN = 700
 MAX_EVIDENCE_LEN = 700
-MAX_STALE_CASCADE = 128
 ERR_EXPECTED = "EXPECTED"
 
 CONTROL_MARKERS = (
@@ -115,7 +111,7 @@ class DependentClaim:
     created_at: u256
     stale_at: u256
     stale_reason: str
-    definition_hash: str
+    claim_hash: str
 
 
 @gl.contract_interface
@@ -264,7 +260,7 @@ def host_allowed(url: str, authority_hosts: typing.Iterable[str]) -> bool:
     host = host_of(url)
     for allowed in authority_hosts:
         item = str(allowed).lower().strip(".")
-        if host == item or host.endswith("." + item):
+        if host == item:
             return True
     return False
 
@@ -584,6 +580,23 @@ class Errata(gl.Contract):
             raise gl.vm.UserError(f"{ERR_EXPECTED}: unknown claim")
         return self.claims[claim_id]
 
+    def _claim_is_current_lazy(self, claim_id: u256, seen: typing.Iterable[int] = ()) -> bool:
+        claim = self._claim(claim_id)
+        if int(claim.status) == CLAIM_STALE or int(claim.record_id) <= 0:
+            return False
+        for prior in seen:
+            if int(prior) == int(claim_id):
+                return False
+        record = self._record(claim.record_id)
+        if int(record.status) != RECORD_ACTIVE or int(record.current_revision_id) != int(claim.revision_id):
+            return False
+        next_seen = list(seen)
+        next_seen.append(int(claim_id))
+        for parent_id in claim.parent_ids:
+            if not self._claim_is_current_lazy(parent_id, next_seen):
+                return False
+        return True
+
     def _record_definition_hash(self, record: Record) -> str:
         payload = {
             "subject": str(record.subject),
@@ -646,31 +659,8 @@ class Errata(gl.Contract):
         }
         return hash_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
-    def _stale_claim_cascade(self, starting_claim_ids: typing.Iterable[u256], reason: str) -> None:
-        stack: list[int] = [int(item) for item in starting_claim_ids]
-        seen: list[int] = []
-        now = message_timestamp()
-        while len(stack) > 0:
-            if len(seen) >= MAX_STALE_CASCADE:
-                raise gl.vm.UserError(f"{ERR_EXPECTED}: stale cascade exceeds safety bound")
-            cid = stack.pop()
-            if cid in seen or cid <= 0 or cid > int(self.claim_count):
-                continue
-            seen.append(cid)
-            claim = self.claims[u256(cid)]
-            if int(claim.status) != CLAIM_STALE:
-                claim.status = u8(CLAIM_STALE)
-                claim.stale_at = u256(now)
-                claim.stale_reason = clean_text(reason, MAX_REASON_LEN)
-                self.claims[u256(cid)] = claim
-                ClaimStaled(u256(cid)).emit()
-            for child in claim.child_ids:
-                stack.append(int(child))
-
     @gl.public.write
     def create_record(self, subject: str, definition: str) -> u256:
-        if int(self.record_count) >= MAX_RECORDS:
-            raise gl.vm.UserError(f"{ERR_EXPECTED}: record limit reached")
         subject_clean = clean_text(subject, MAX_SUBJECT_LEN)
         definition_clean = clean_text(definition, MAX_DEFINITION_LEN)
         if subject_clean == "" or definition_clean == "":
@@ -772,9 +762,6 @@ class Errata(gl.Contract):
         if not bool(result.get("accepted")):
             raise gl.vm.UserError(f"{ERR_EXPECTED}: source does not establish the declared initial record")
 
-        if int(self.revision_count) >= MAX_RECORDS * MAX_REVISIONS_PER_RECORD:
-            raise gl.vm.UserError(f"{ERR_EXPECTED}: revision limit reached")
-
         revision_id = u256(int(self.revision_count) + 1)
         statement = clean_text(result.get("statement", ""), MAX_STATEMENT_LEN)
         reason = clean_text(result.get("reason", ""), MAX_REASON_LEN)
@@ -818,13 +805,14 @@ class Errata(gl.Contract):
     @gl.public.write
     def propose_revision(self, record_id: u256, source_url: str) -> u256:
         record = self._record(record_id)
-        if int(record.status) not in (RECORD_ACTIVE, RECORD_RETRACTED):
-            raise gl.vm.UserError(f"{ERR_EXPECTED}: record has no published canon")
-        if len(record.revision_ids) >= MAX_REVISIONS_PER_RECORD:
-            raise gl.vm.UserError(f"{ERR_EXPECTED}: revision limit reached")
+        if int(record.status) != RECORD_ACTIVE:
+            raise gl.vm.UserError(f"{ERR_EXPECTED}: retracted records are terminal")
         url = validate_url(source_url)
         if not host_allowed(url, record.authority_hosts):
             raise gl.vm.UserError(f"{ERR_EXPECTED}: source host is outside the sealed evidence surface")
+        for assessed_id in record.revision_ids:
+            if str(self.revisions[assessed_id].source_url) == url:
+                raise gl.vm.UserError(f"{ERR_EXPECTED}: publication has already been assessed")
 
         prior_id = int(record.current_revision_id)
         if prior_id <= 0:
@@ -940,7 +928,6 @@ class Errata(gl.Contract):
 
             stale_reason = f"canonical revision changed via {relation_name(relation)}"
             old_revision = self.revisions[old_revision_id]
-            self._stale_claim_cascade(old_revision.dependent_claim_ids, stale_reason)
             CanonAdvanced(record_id, old_revision_id, revision_id).emit()
         else:
             self.records[record_id] = record
@@ -956,8 +943,6 @@ class Errata(gl.Contract):
         revision_id: u256,
         parent_ids: list[u256],
     ) -> u256:
-        if int(self.claim_count) >= MAX_CLAIMS:
-            raise gl.vm.UserError(f"{ERR_EXPECTED}: claim limit reached")
         label_clean = clean_text(label, MAX_LABEL_LEN)
         if label_clean == "":
             raise gl.vm.UserError(f"{ERR_EXPECTED}: claim label is required")
@@ -982,7 +967,7 @@ class Errata(gl.Contract):
             if parent_id in seen:
                 raise gl.vm.UserError(f"{ERR_EXPECTED}: duplicate parent claim")
             parent = self._claim(u256(parent_id))
-            if int(parent.status) != CLAIM_CURRENT:
+            if not self._claim_is_current_lazy(u256(parent_id)):
                 raise gl.vm.UserError(f"{ERR_EXPECTED}: stale parent claims cannot support new claims")
             if len(parent.child_ids) >= MAX_CHILDREN:
                 raise gl.vm.UserError(f"{ERR_EXPECTED}: parent child limit reached")
@@ -1009,7 +994,7 @@ class Errata(gl.Contract):
             created_at=u256(message_timestamp()),
             stale_at=u256(0),
             stale_reason="",
-            definition_hash=claim_hash,
+            claim_hash=claim_hash,
         )
         self.claims[claim_id] = claim
         self.claim_count = claim_id
@@ -1075,12 +1060,12 @@ class Errata(gl.Contract):
             "revision_id": int(claim.revision_id),
             "parent_ids": [int(item) for item in claim.parent_ids],
             "child_ids": [int(item) for item in claim.child_ids],
-            "status": int(claim.status),
-            "status_name": claim_status_name(int(claim.status)),
+            "status": CLAIM_CURRENT if self._claim_is_current_lazy(claim_id) else CLAIM_STALE,
+            "status_name": "CURRENT" if self._claim_is_current_lazy(claim_id) else "STALE",
             "created_at": int(claim.created_at),
             "stale_at": int(claim.stale_at),
             "stale_reason": str(claim.stale_reason),
-            "definition_hash": str(claim.definition_hash),
+            "claim_hash": str(claim.claim_hash),
         }
 
     @gl.public.view
@@ -1100,20 +1085,9 @@ class Errata(gl.Contract):
     @gl.public.view
     def is_claim_current(self, claim_id: u256, expected_claim_hash: str) -> bool:
         claim = self._claim(claim_id)
-        if int(claim.status) != CLAIM_CURRENT:
+        if str(claim.claim_hash) != str(expected_claim_hash):
             return False
-        if str(claim.definition_hash) != str(expected_claim_hash):
-            return False
-        record = self._record(claim.record_id)
-        if int(record.status) != RECORD_ACTIVE:
-            return False
-        if int(record.current_revision_id) != int(claim.revision_id):
-            return False
-        for parent_id in claim.parent_ids:
-            parent = self._claim(parent_id)
-            if int(parent.status) != CLAIM_CURRENT:
-                return False
-        return True
+        return self._claim_is_current_lazy(claim_id)
 
     @gl.public.view
     def current_canon_hash(self, record_id: u256) -> str:
