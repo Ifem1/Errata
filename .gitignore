@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+*.pyc
+dist/
+handoff_private/
+deployment.local.json
+gitmeta/
