@@ -34,7 +34,7 @@ CLAIM_STALE = 2
 
 MAX_AUTHORITY_HOSTS = 6
 MAX_PARENTS = 8
-MAX_CHILDREN = 16
+MAX_DEPENDENCY_DEPTH = 32
 MAX_SUBJECT_LEN = 180
 MAX_DEFINITION_LEN = 1800
 MAX_LABEL_LEN = 120
@@ -106,7 +106,6 @@ class DependentClaim:
     record_id: u256
     revision_id: u256
     parent_ids: DynArray[u256]
-    child_ids: DynArray[u256]
     status: u8
     created_at: u256
     stale_at: u256
@@ -581,6 +580,8 @@ class Errata(gl.Contract):
         return self.claims[claim_id]
 
     def _claim_is_current_lazy(self, claim_id: u256, seen: typing.Iterable[int] = ()) -> bool:
+        if len(list(seen)) >= MAX_DEPENDENCY_DEPTH:
+            return False
         claim = self._claim(claim_id)
         if int(claim.status) == CLAIM_STALE or int(claim.record_id) <= 0:
             return False
@@ -596,6 +597,17 @@ class Errata(gl.Contract):
             if not self._claim_is_current_lazy(parent_id, next_seen):
                 return False
         return True
+
+    def _claim_depth(self, claim_id: u256, seen: typing.Iterable[int] = ()) -> int:
+        if len(list(seen)) >= MAX_DEPENDENCY_DEPTH:
+            return MAX_DEPENDENCY_DEPTH + 1
+        claim = self._claim(claim_id)
+        next_seen = list(seen)
+        next_seen.append(int(claim_id))
+        depth = 1
+        for parent_id in claim.parent_ids:
+            depth = max(depth, 1 + self._claim_depth(parent_id, next_seen))
+        return depth
 
     def _record_definition_hash(self, record: Record) -> str:
         payload = {
@@ -894,6 +906,9 @@ class Errata(gl.Contract):
             int(record_id), url, relation, prior_id, statement, evidence_hash, evidence
         )
         lineage_hash = self._lineage_hash(prior_id, revision_hash)
+        for assessed_id in record.revision_ids:
+            if str(self.revisions[assessed_id].revision_hash) == revision_hash:
+                raise gl.vm.UserError(f"{ERR_EXPECTED}: assessment has already been recorded")
         dependents: DynArray[u256] = []
         revision = Revision(
             record_id=record_id,
@@ -969,13 +984,12 @@ class Errata(gl.Contract):
             parent = self._claim(u256(parent_id))
             if not self._claim_is_current_lazy(u256(parent_id)):
                 raise gl.vm.UserError(f"{ERR_EXPECTED}: stale parent claims cannot support new claims")
-            if len(parent.child_ids) >= MAX_CHILDREN:
-                raise gl.vm.UserError(f"{ERR_EXPECTED}: parent child limit reached")
+            if self._claim_depth(u256(parent_id)) >= MAX_DEPENDENCY_DEPTH:
+                raise gl.vm.UserError(f"{ERR_EXPECTED}: dependency depth limit reached")
             seen.append(parent_id)
             normalized_parents.append(u256(parent_id))
 
         claim_id = u256(next_id)
-        children: DynArray[u256] = []
         parents_dyn: DynArray[u256] = []
         for item in normalized_parents:
             parents_dyn.append(item)
@@ -989,7 +1003,6 @@ class Errata(gl.Contract):
             record_id=record_id,
             revision_id=revision_id,
             parent_ids=parents_dyn,
-            child_ids=children,
             status=u8(CLAIM_CURRENT),
             created_at=u256(message_timestamp()),
             stale_at=u256(0),
@@ -1001,11 +1014,6 @@ class Errata(gl.Contract):
 
         revision.dependent_claim_ids.append(claim_id)
         self.revisions[revision_id] = revision
-        for parent_id in normalized_parents:
-            parent = self.claims[parent_id]
-            parent.child_ids.append(claim_id)
-            self.claims[parent_id] = parent
-
         ClaimCreated(claim_id, record_id, revision_id).emit()
         return claim_id
 
@@ -1059,7 +1067,6 @@ class Errata(gl.Contract):
             "record_id": int(claim.record_id),
             "revision_id": int(claim.revision_id),
             "parent_ids": [int(item) for item in claim.parent_ids],
-            "child_ids": [int(item) for item in claim.child_ids],
             "status": CLAIM_CURRENT if self._claim_is_current_lazy(claim_id) else CLAIM_STALE,
             "status_name": "CURRENT" if self._claim_is_current_lazy(claim_id) else "STALE",
             "created_at": int(claim.created_at),

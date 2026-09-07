@@ -383,14 +383,22 @@ def test_subdomain_of_exact_host_is_rejected(direct_vm, direct_deploy):
 
 def test_lazy_freshness_supports_long_dependency_chain(direct_vm, direct_deploy):
     contract, record_id, revision_id = create_active_record(direct_vm, direct_deploy)
-    parent = 0
     for index in range(129):
-        parent = contract.create_claim(f"Long dependency {index}", record_id, revision_id, [parent] if parent else [])
-    assert contract.get_claim(parent)["status_name"] == "CURRENT"
+        claim_id = contract.create_claim(f"Long dependency {index}", record_id, revision_id, [])
+    assert contract.get_claim(claim_id)["status_name"] == "CURRENT"
     direct_vm.clear_mocks()
     mock_correction(direct_vm)
     contract.propose_revision(record_id, V2_URL)
-    assert contract.get_claim(parent)["status_name"] == "STALE"
+    assert contract.get_claim(claim_id)["status_name"] == "STALE"
+
+
+def test_dependency_depth_is_bounded(direct_vm, direct_deploy):
+    contract, record_id, revision_id = create_active_record(direct_vm, direct_deploy)
+    parent = contract.create_claim("depth 1", record_id, revision_id, [])
+    for index in range(31):
+        parent = contract.create_claim(f"depth {index + 2}", record_id, revision_id, [parent])
+    with direct_vm.expect_revert("dependency depth limit"):
+        contract.create_claim("too deep", record_id, revision_id, [parent])
 
 
 def test_non_material_assessments_do_not_consume_canon_capacity(direct_vm, direct_deploy):
