@@ -89,9 +89,9 @@ Builders can create immutable dependent claims pinned to the current canonical r
 
 Claims may also depend on earlier claims, creating a bounded acyclic dependency DAG.
 
-When a material correction changes the canonical revision, Errata deterministically marks claims pinned to the old revision `STALE` and cascades staleness to descendants.
+Freshness is lazy and deterministic: reads and consumer gates derive `CURRENT`/`STALE` from the immutable claim pin and its parent lineage. Canon advancement is therefore O(1); no unbounded child list or eager cascade is stored.
 
-The LLM never decides which dependent claims become stale. Once consensus establishes a material canonical change, invalidation is deterministic.
+Authority hosts are exact matches by default. A publication on a subdomain is rejected unless that hostname is explicitly present in the sealed authority surface.
 
 ## Real cross-contract consumer
 
@@ -176,14 +176,14 @@ Then deploy the consumer with the finalized Errata address:
 
 Do not claim network verification until both deployments and the cross-contract stale-claim lifecycle have finalized successfully.
 
-## Verified StudioNet deployments
+## Final StudioNet deployments
 
 The contracts were deployed to GenLayer StudioNet (chain ID `61999`) and their receipts were polled to `FINALIZED` with `SUCCESS` execution and majority agreement:
 
 | Contract | Address | Deployment transaction |
 | --- | --- | --- |
-| Errata | `0x245A87125Af6Ab2DF7E3e70e3797820C0b01F70A` | `0x4a1af301a473316f8f144a19aeec39421c3b4f69e36ca8fbe7e6786096c97203` |
-| CanonGate | `0x27b49ed5675278188CB637e560F282636Df53aF3` | `0x72a79eaff4c1292f4b6f38bb4721fee98bbbb06fb37ed346c409bc300fbd8320` |
+| Errata | `0x42Fc7737C8A3750918a7996853d8E81052A62109` | `0x41131db426dd87bd13035d46f9024610ffbdb8ec201671fc910a04081fba549c` |
+| CanonGate | `0xE06548440448B24b946f7aFc2A26F62140f31870` | `0x085d6d5f5b2ab663478d6e950c49c1f232cdf7f1b74280f9014f49eb7d639d3c` |
 
 Reproduce the local checks with:
 
