@@ -31,7 +31,7 @@ The creator freezes:
 
 Publishing the initial record seals that surface.
 
-Later callers may propose publications only from the sealed host set (or its subdomains). GenLayer validators independently fetch and classify the publication relative to the current canonical statement:
+Later callers may propose publications only from hosts explicitly included in the sealed authority set. Subdomains are not implicitly trusted and must be added separately. GenLayer validators independently fetch and classify the publication relative to the current canonical statement:
 
 - `CONFIRMS`
 - `AMENDS`
